@@ -1,0 +1,305 @@
+---
+title: "Financial Statements Analysis Quarter 2 2023"
+author: "Tanis Anderson"
+date: "2023-09-06"
+output:
+  html_document:
+    toc: yes
+    toc_float:
+      collapsed: no
+    toc_depth: 2
+    number_sections: yes
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+load(".RData")
+library("tidyverse")
+library("lubridate")
+library("RColorBrewer")
+library("knitr")
+library("DBI")
+library("httr")
+library("jsonlite")
+library("RPostgreSQL")
+library("RPostgres")
+
+# Database credentials omitted for privacy reasons
+connection <- dbConnect(RPostgres::Postgres(), dbname = "",
+                        host = "", 
+                        port = 0,
+                        user = "",
+                        password = "")
+
+plt_theme <- theme(plot.title = element_text(hjust = 0.5),
+        plot.background = element_rect(color = "#f5f5f5", fill = "#f5f5f5"))
+```
+
+```{css, include = TRUE, echo = FALSE}
+h1.title, h4.author, h4.date{
+text-align: center
+}
+.list-group-item.active, .list-group-item.active:focus, .list-group-item.active:hover {
+    background-color: #e4f4ff;
+    color: black;
+}
+#header{
+
+}
+
+#TOC {
+
+}
+
+body{
+  font-family: Calibri;
+  background-color: #f5f5f5;
+}
+
+p{
+  font-size: 18px;
+}
+
+pre {
+  background-color: #e4f4ff;
+  color: black;
+}
+table{
+  background-color: #f5f5f5;
+}
+r{
+  background-color: blue;
+}
+```
+# Introduction
+ 
+The Securities and Exchange Commission releases open data sets for each quarter going back to 2009. The data sets contain information from exhibits to corporate financial reports filed with the Commission using Extensible Business Reporting Language. The data sets can be found [here](https://catalog.data.gov/dataset/financial-statement-data-sets). When downloading the data sets, they come in tab delimited text files. I have taken these files and uploaded the into a PostgreSQL database on my local machine to use for analysis. I will be connecting to the database to perform SQL queries on the data through the programming language R. Visualizations will be made using the R package `ggplot2` on the data that is returned from the queries. Some minor data cleaning has been performed on the data sets using R before being uploaded into the database. This was to make sure that the data conformed to the guidelines provided and allowed for easy uploading into the database. 
+
+The commission provides a document that describes the data sets and explains how the data sets are related to each other which can be found [here](https://drive.google.com/file/d/1JMn0NdmUyMN7xy7vBOKmsaA41Ee_v9ET/view?usp=sharing). Rows were removed from the `sub` data set where there was a missing  county of the registrants business address. Rows were removed from the `num` data set where there was a missing `value` field. Missing strings were replaced with an empty string ("") and missing integer values were replaced with either a 0 or -1 for fields throughout all four tables depending on the feature of the data set.
+
+# Submissions
+
+The `sub` data set contains summary information about submissions made by each registrant. Each submission is assigned a unique accession number (adsh) from the SEC. Each submission has a country of the registrant's business address, `countryba`. Submissions that had a null value for this field were excluded from the database. There are 30,167 submissions in my database. 
+
+## Filings
+
+The `filed` column gives the date of the registrant's filing in "yyyymmdd" format. The earliest submission for this quarter was filed on April 3rd with the last submission filed on June 30th. These dates can also be grouped together to show when most filings occurs. **Graph 2.1** shows a distribution of the number of filings per date for this quarter. Most filings were submitted between the end of April and the middle of May.
+
+```{r echo=TRUE}
+query <-"SELECT MIN(filed) as earliest_submission, MAX(filed) as latest_submission
+         FROM sub"
+
+dbGetQuery(connection, query)
+
+```
+
+```{r echo=TRUE}
+query <-"SELECT filed, COUNT(filed) as num_of_submissions
+         FROM sub
+         GROUP BY filed
+         ORDER BY num_of_submissions DESC"
+
+df <- dbGetQuery(connection, query)
+
+#Creating plot with R
+df %>%
+  mutate(filed = ymd(filed), num_of_submissions = as.integer(num_of_submissions)) %>%
+  ggplot(aes(filed,  num_of_submissions)) +
+  geom_area(fill = "lightblue")+
+  labs(title = "Graph 2.1 - Submissions by Date", x = "Date Filed", y = "Number of Submissions") +
+  plt_theme
+```
+
+## Submissions by Country
+
+We can see which countries had the highest number of submissions, given in the  `countryba` field. Registrants located in the United states make up the overwhelming majority of submissions, with Canada and China being the only other two countries containing over 1% of submissions. **Graph 2.2** shows the top ten states in the US had the most submissions.
+```{r echo=TRUE}
+query <-"SELECT countryba, COUNT(countryba) as num_submissions, 
+          ROUND(COUNT(countryba) / 30167.0 * 100,2) as percent_of_submissions
+          FROM sub 
+          GROUP BY countryba 
+          ORDER BY num_submissions DESC
+          LIMIT 20"
+
+dbGetQuery(connection, query)
+
+```
+```{r echo = TRUE}
+#Query to return count of submissions by state
+query <- "SELECT stprba as state, COUNT(stprba) as num_submissions
+          FROM sub
+          WHERE countryba = 'US' AND stprba <> ''
+          GROUP BY stprba
+          ORDER BY num_submissions DESC
+          LIMIT 10"
+
+df <- dbGetQuery(connection, query)
+
+#Creating plot with R
+df$num_submissions <- as.integer(df$num_submissions)
+ggplot(df, aes(reorder(state, -num_submissions), num_submissions)) +
+  geom_col(fill = "lightblue") +
+  labs(x = "State",  y = "Submissions", title = "Graph 2.2 - Submissions by State")+
+  plt_theme
+```
+
+## Submissions by Company
+
+Similarly we can see which companies had the highest number of submissions.
+
+```{r echo=TRUE}
+query <-"SELECT name, COUNT(name) as num_submissions
+          FROM sub 
+          GROUP BY name
+          ORDER BY num_submissions DESC"
+
+dbGetQuery(connection, query)
+
+```
+
+News Corp has the highest number of submissions, but if we add together all the submissions containing Federal Home Loan Bank across all of its locations, they now have the highest number of submissions at 296.
+
+```{r echo=TRUE}
+query <-"SELECT COUNT(name) as num_submissions
+          FROM sub 
+          WHERE name LIKE 'FEDERAL HOME LOAN BANK%'"
+          
+
+dbGetQuery(connection, query)
+
+```
+# Numbers and Tags
+
+The `num` data set contains numeric data with one row for each point in the financial statements. Each row in the numbers data set contains a tag that appears in the `tag` data set, which contains all standard taxonomy tags.
+
+There are 11 adsh values in the `num` data set that do not appear in the submissions data set. These unknown adsh values are likely caused by an error or were entered incorrectly. These values will be filtered out when looking at `value`s for numbers data set.
+
+```{r echo = TRUE}
+query <- "SELECT DISTINCT(adsh)
+          FROM num
+          WHERE adsh  NOT IN (SELECT DISTINCT(adsh) from  sub)"
+
+
+dbGetQuery(connection, query)
+
+```
+
+## Numeric Counts by Company
+
+Similar to how we saw which countries and states had the most submissions, we can see which companies reported the most amount of numeric data in their submission by counting how many times a company's unique `adsh` value occurs in the set. 
+```{r echo = TRUE}
+query <- "SELECT name, COUNT(name) as num_of_values
+          FROM sub
+          INNER JOIN num
+          USING(adsh)
+          GROUP BY name
+          ORDER BY num_of_values DESC
+          LIMIT 20"
+
+dbGetQuery(connection, query)
+
+```
+
+## Most Popular Tags
+Each row has a `tag` field for the value, which can be either a standard tag or a custom tag. The highest frequency tags are shown along with their average value. Stockholders Equity occurs the most, while Assets has the highest average value. The data was also filtered on the `uom` field (unit of measure) for results in USD only to prevent other currencies from skewing the results.
+
+```{r echo = TRUE}
+query <- "SELECT tag, COUNT(tag) as count, AVG(value) as avg_value
+          FROM num
+          WHERE adsh IN (SELECT DISTINCT(adsh) FROM sub) AND uom = 'USD'
+          GROUP BY tag
+          ORDER BY count DESC
+          LIMIT 20;"
+dbGetQuery(connection, query)
+```
+
+## Assets and Liabilities
+
+Assets and Liabilities are two of the most popular tags in this data set. By subtracting the total amount of a company's submitted liabilities from their assets, we can get a very rough idea of that company's equity or net worth. While there are more factors outside of values listed under these two tags, below shows the top 100 companies ordered by their assets minus liabilities. The top five companies all have a value of over two trillion when doing this calculation. More on equity will be discussed in a later section.
+
+Since 'Assets' and 'Liabilities' are values in a column (tag) and not columns themselves, I had to manipulate the data to make the values related to assets and liabilities in columns to aggregate it for this calculation.
+
+```{r echo = TRUE}
+query <- "SELECT name, adsh, SUM(asset_value) - SUM(liabilities_value) as assets_minus_liabilities
+          FROM sub
+          INNER JOIN (SELECT adsh, 
+                     CASE WHEN tag = 'Assets' THEN value
+                     ELSE 0 END AS asset_value,
+                     CASE WHEN tag = 'Liabilities' THEN value
+                     ELSE 0 END AS liabilities_value
+                     FROM num
+                     WHERE (tag = 'Liabilities' OR tag = 'Assets') AND uom = 'USD') as t2
+          USING(adsh)
+          GROUP BY adsh
+          ORDER BY assets_minus_liabilities DESC
+          LIMIT 100"
+ 
+dbGetQuery(connection, query)
+
+```
+
+# Presentation of Statements
+
+The `pre` data set contains one row for each line of the financial statement submitted by the filer. One key feature of this data set is the `stmt` field, which refers to he statement location to which the value pertains. These can be thought of as more generalized "tags", with values such as 'BS' for balance sheet statements, 'CF' for cash flow, and others.
+
+Below is a list of all the statement field values and how many times they appear.
+
+```{r echo = TRUE}
+query <- "SELECT stmt, COUNT(stmt) as occurences
+          FROM pre
+          GROUP BY stmt
+          ORDER BY occurences DESC"
+
+dbGetQuery(connection, query)
+```
+
+## Equity
+
+One value for the statement field is 'EQ' which stands for equity. By joining this data set with `num` and filtering for rows that have a `stmt` value of 'EQ' and sum up all the values, we may be able to get a better idea of a companies equity compared to the previous method. The returned table has some same companies when compared to the method in the Assets and Liabilities section, but also with some new ones. 
+
+``` {r echo = TRUE}
+query <- "SELECT (SELECT name FROM sub where sub.adsh = num.adsh) , adsh, SUM(value) as equity_sum
+          FROM num
+          INNER JOIN pre
+          USING(adsh, tag, version)
+          WHERE stmt = 'EQ' AND uom = 'USD' 
+          GROUP BY adsh
+          ORDER BY equity_sum DESC
+          LIMIT 100"
+
+dbGetQuery(connection, query)
+```
+
+## Cash Flow and Revenue
+
+Another set of values we can look at is where the statement field is 'CF', standing for cash flow. This can then be further filtered to look at a cash flow values where the tag is 'Revenues'. **Graph 4.2** uses a density plot to show the shape of the distribution of the values in this tag. Most of the revenue values lie between negative $2.5 billion and $2.5 billion.
+
+```{r echo = TRUE}
+
+# Query to return all revenue values in cash flow
+query <- "SELECT tag, value
+          FROM pre
+          INNER JOIN num
+          USING(adsh, tag, version)
+          WHERE stmt = 'CI' AND tag IN (SELECT DISTINCT(tag) from tag WHERE custom = 'false') AND uom = 'USD'"
+
+df<- dbGetQuery(connection, query)
+
+# Query to return the average revenue value
+query <- "SELECT AVG(value) as avg_revenue_value
+          FROM pre
+          INNER JOIN num
+          USING(adsh, tag, version)
+          WHERE stmt = 'CI' AND tag = 'Revenues' AND uom = 'USD'"
+
+mean_revenue_value <- dbGetQuery(connection, query)
+
+# Creating plot with R
+ggplot(df %>% filter(tag %in% c("Revenues")), aes(value)) +
+  geom_density(fill = "lightblue") +
+  geom_vline(xintercept = mean_revenue_value$avg_revenue_value, linetype = 2)+
+  annotate("text", x = 4.5e09, y = 1.7e-10,  label = "Average 'Revenues' value")+
+  labs(title = "Graph 4.2 - Distribution of Renvenue Values", y = "Density")+
+  plt_theme
+```
